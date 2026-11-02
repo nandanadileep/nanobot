@@ -62,6 +62,28 @@ class TestStripThinkFalsePositive:
         text = 'Example:\n```\ntext = re.sub(r"<think>[\\s\\S]*", "", text)\n```\nDone.'
         assert strip_think(text) == text
 
+    def test_fenced_code_block_literal_tag_pair_preserved(self):
+        open_tag = "<thin" + "king>"
+        close_tag = "</thin" + "king>"
+        text = f"Example XML:\n```xml\n{open_tag}keep this literal example{close_tag}\n```"
+        assert strip_think(text) == text
+
+    def test_fenced_code_block_literal_thought_pair_preserved(self):
+        text = "```\n<thought>literal</thought>\n```"
+        assert strip_think(text) == text
+
+    def test_inline_code_literal_tag_pair_preserved(self):
+        open_tag = "<thin" + "king>"
+        close_tag = "</thin" + "king>"
+        text = f"Use `{open_tag}example{close_tag}` verbatim."
+        assert strip_think(text) == text
+
+    def test_reasoning_outside_code_block_still_stripped(self):
+        open_tag = "<thin" + "king>"
+        close_tag = "</thin" + "king>"
+        text = f"Thinking: {open_tag}secret{close_tag}\nExample:\n```xml\n<x/>\n```"
+        assert strip_think(text) == "Thinking: \nExample:\n```xml\n<x/>\n```"
+
     def test_backtick_thought_tag_preserved(self):
         text = "Gemma 4 uses `<thought>` blocks for reasoning."
         assert strip_think(text) == text

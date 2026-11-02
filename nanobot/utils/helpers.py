@@ -167,6 +167,30 @@ _THINKING_TAG_PREFIX = "|".join(
 _PARTIAL_THINKING_TAG = rf"</?(?:{_THINKING_TAG_PREFIX})>?"
 
 
+_FENCED_OR_INLINE_CODE = re.compile(
+    r"```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|(?<!`)`[^`\n]*`(?!`)"
+)
+
+
+def _split_code_segments(text: str) -> list[tuple[bool, str]]:
+    """Split ``text`` into ``(is_code, segment)`` runs.
+
+    Fenced code blocks (``` / ~~~) and inline code spans are marked as code so
+    callers can leave their contents untouched. An unterminated fence extends
+    to the end of the text, matching how streaming partial output renders.
+    """
+    segments: list[tuple[bool, str]] = []
+    pos = 0
+    for match in _FENCED_OR_INLINE_CODE.finditer(text):
+        if match.start() > pos:
+            segments.append((False, text[pos : match.start()]))
+        segments.append((True, match.group(0)))
+        pos = match.end()
+    if pos < len(text):
+        segments.append((False, text[pos:]))
+    return segments
+
+
 def strip_think(text: str) -> str:
     """Remove thinking blocks, unclosed trailing tags, and tokenizer-level
     template leaks occasionally emitted by some models (notably Gemma 4's
@@ -192,14 +216,41 @@ def strip_think(text: str) -> str:
     the edge-only stripping of (4) and (5) is deliberate: stripping those
     tokens mid-text would silently rewrite any message where a user or the
     assistant discusses the tokens themselves.
+
+    Fenced code blocks and inline code spans are treated as literal content:
+    a complete think-tag pair shown as an XML example is preserved instead of
+    being deleted.
     """
     if "<" not in text:
         return text.strip()
+    segments = _split_code_segments(text)
+    parts: list[str] = []
+    last = len(segments) - 1
+    for index, (is_code, seg) in enumerate(segments):
+        if is_code:
+            parts.append(seg)
+        else:
+            parts.append(
+                _strip_think_visible(seg, at_start=index == 0, at_end=index == last)
+            )
+    return "".join(parts).strip()
+
+
+def _strip_think_visible(text: str, *, at_start: bool, at_end: bool) -> str:
+    """Apply tag-removal rules to one non-code segment.
+
+    ``at_start`` / ``at_end`` gate the deliberately edge-only rules (orphan
+    closing tags, channel markers, trailing partial tags) so they only fire at
+    the true boundaries of the message, not around embedded code spans.
+    """
     text = re.sub(rf"<(?P<tag>{_THINKING_TAG})>[\s\S]*?</(?P=tag)>", "", text)
-    text = re.sub(rf"^\s*<{_THINKING_TAG}>[\s\S]*$", "", text)
+    if at_start:
+        text = re.sub(rf"^\s*<{_THINKING_TAG}>[\s\S]*$", "", text)
     # Self-closing `<thinking/>` is an empty marker, not user-visible text.
-    text = re.sub(rf"^\s*<{_INLINE_SELF_CLOSING_THINKING_TAG}/>\s*", "", text)
-    text = re.sub(rf"\s*<{_INLINE_SELF_CLOSING_THINKING_TAG}/>\s*$", "", text)
+    if at_start:
+        text = re.sub(rf"^\s*<{_INLINE_SELF_CLOSING_THINKING_TAG}/>\s*", "", text)
+    if at_end:
+        text = re.sub(rf"\s*<{_INLINE_SELF_CLOSING_THINKING_TAG}/>\s*$", "", text)
     # Malformed opening tags: `<think` / `<thinking` / `<thought` where the next char is
     # NOT one that could continue a valid tag / identifier name. Explicitly
     # listing ASCII tag-name chars (letters, digits, `_`, `-`, `:`) plus
@@ -207,19 +258,21 @@ def strip_think(text: str) -> str:
     # Unicode regex mode it matches CJK characters too, which would defeat
     # the primary fix for `<think广场…` leaks.
     text = re.sub(rf"<{_THINKING_TAG}(?![A-Za-z0-9_\-:>/])", "", text)
-    text = re.sub(rf"^\s*</{_THINKING_TAG}>\s*", "", text)
-    text = re.sub(rf"\s*</{_THINKING_TAG}>\s*$", "", text)
-    # Edge-only channel markers (harmony / Gemma 4 variant leaks).
-    text = re.sub(r"^\s*<\|?channel\|?>\s*", "", text)
-    # Stream chunks may end in the middle of a control tag. Strip only known
-    # control-token prefixes at the very end.
-    partial_control_tag = (
-        rf"{_PARTIAL_THINKING_TAG}|"
-        r"<\|?(?:c|ch|cha|chan|chann|channe|channel)(?:\|?>?)?"
-    )
-    text = re.sub(rf"(?:{partial_control_tag})$", "", text)
-    text = re.sub(r"^\s*<\|?$", "", text)
-    return text.strip()
+    if at_start:
+        text = re.sub(rf"^\s*</{_THINKING_TAG}>\s*", "", text)
+        # Edge-only channel markers (harmony / Gemma 4 variant leaks).
+        text = re.sub(r"^\s*<\|?channel\|?>\s*", "", text)
+        text = re.sub(r"^\s*<\|?$", "", text)
+    if at_end:
+        text = re.sub(rf"\s*</{_THINKING_TAG}>\s*$", "", text)
+        # Stream chunks may end in the middle of a control tag. Strip only known
+        # control-token prefixes at the very end.
+        partial_control_tag = (
+            rf"{_PARTIAL_THINKING_TAG}|"
+            r"<\|?(?:c|ch|cha|chan|chann|channe|channel)(?:\|?>?)?"
+        )
+        text = re.sub(rf"(?:{partial_control_tag})$", "", text)
+    return text
 
 
 def strip_reasoning_tags(text: object) -> str:
